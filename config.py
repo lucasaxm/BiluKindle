@@ -13,7 +13,9 @@ ALLOWED_USERS = [int(id) for id in os.getenv('ALLOWED_USERS', '').split(',') if 
 KINDLE_EMAIL = os.getenv('KINDLE_EMAIL', '')
 SENDER_EMAIL = os.getenv('SENDER_EMAIL', '')
 SENDER_PASSWORD = os.getenv('SENDER_PASSWORD', '')
-
+SMTP_SERVER = os.getenv('SMTP_SERVER', '')
+SMTP_PORT = int(os.getenv('SMTP_PORT', '465'))
+SMTP_USE_SSL = os.getenv('SMTP_USE_SSL', 'True').lower() == 'true'
 # Processing Configuration
 CHAPTERS_PER_VOLUME = 10
 

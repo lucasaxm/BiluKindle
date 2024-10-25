@@ -263,10 +263,7 @@ class MangaBot:
         return self.CONFIRM
 
     async def confirm_merge(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """
-        Handle merge confirmation and process the manga volume
-        Includes detailed progress updates and error handling
-        """
+        """Handle merge confirmation and process the manga volume"""
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
@@ -280,42 +277,17 @@ class MangaBot:
 
         # Initialize status message
         status_message = await query.edit_message_text(
-            "🔄 Starting process...\n\n"
-            "This may take a few minutes depending on the number "
-            "and size of chapters."
+            "🔄 Processing chapters...\n"
+            "Please wait, this may take a few minutes."
         )
 
-        # Flag to control progress updates
-        is_sending_complete = False
-
-        async def update_status(text: str):
-            """Helper function to update status message"""
-            try:
-                if not is_sending_complete:  # Only update if sending isn't complete
-                    await status_message.edit_text(text)
-            except Exception as e:
-                self.logger.error(f"Failed to update status message: {e}")
-
         try:
-            # Validate pending chapters
-            if not self.pending_chapters.get(user_id):
-                await update_status("❌ Error: No chapters found to process.")
-                return ConversationHandler.END
-
-            # Create output filename with manga title and volume
+            # Create output filename
             output_filename = (
                 f"{metadata['title']}_Vol_{metadata['volume']}"
                 f"_{len(self.pending_chapters[user_id])}_chapters.pdf"
             )
             output_path = os.path.join("downloads", output_filename)
-
-            # Update status with chapter count and processing info
-            await update_status(
-                f"📚 Processing {len(self.pending_chapters[user_id])} chapters...\n\n"
-                f"Title: {metadata['title']}\n"
-                f"Volume: {metadata['volume']}\n\n"
-                "🔄 Merging chapters..."
-            )
 
             # Merge chapters
             processed_path = self.merger.merge_chapters_to_volume(
@@ -323,100 +295,56 @@ class MangaBot:
                 output_path
             )
 
-            if not processed_path:
-                await update_status(
-                    "❌ Failed to merge chapters.\n\n"
+            if not processed_path or not os.path.exists(processed_path):
+                await status_message.edit_text(
+                    "❌ Failed to merge chapters.\n"
                     "Please check if all files are valid manga chapters."
                 )
                 return ConversationHandler.END
 
-            # Check if merged file exists and has size
-            if not os.path.exists(processed_path) or os.path.getsize(processed_path) == 0:
-                await update_status(
-                    "❌ Error: Generated file is invalid or empty.\n\n"
-                    "Please try again with different chapters."
-                )
-                return ConversationHandler.END
-
-            # Update status before sending to Kindle
-            await update_status(
-                f"✅ Chapters merged successfully!\n\n"
-                f"📤 Sending to Kindle: {self.kindle_sender.kindle_email}\n"
-                f"Please wait..."
+            await status_message.edit_text(
+                "📤 Sending to Kindle...\n"
+                "Please wait..."
             )
 
-            # Create a wrapper for the progress callback that uses asyncio
-            async def send_to_kindle():
-                def progress_callback(msg: str):
-                    # Create a coroutine that we can await
-                    async def update_progress():
-                        await update_status(
-                            f"📤 Sending to Kindle...\n\n"
-                            f"Status: {msg}"
-                        )
-
-                    # Schedule the coroutine to run
-                    context.application.create_task(update_progress())
-
-                return self.kindle_sender.send_file(processed_path, progress_callback)
-
             # Send to Kindle
-            success = await context.application.create_task(send_to_kindle())
-
-            # Set flag to prevent further progress updates
-            is_sending_complete = True
+            success = self.kindle_sender.send_file(processed_path)
 
             if success:
-                final_message = (
+                await status_message.edit_text(
                     f"✅ Success! Volume {metadata['volume']} of {metadata['title']}"
                     f" has been sent to your Kindle.\n\n"
                     f"📚 Chapters: {len(self.pending_chapters[user_id])}\n"
-                    f"📧 Sent to: {self.kindle_sender.kindle_email}\n\n"
-                    f"The book should appear on your Kindle shortly."
+                    f"📧 Sent to: {self.kindle_sender.kindle_email}"
                 )
             else:
-                final_message = (
+                await status_message.edit_text(
                     "❌ Failed to send to Kindle.\n\n"
                     "Please check:\n"
                     "1. Your Kindle email address is correct\n"
                     "2. The sender email is approved in your Amazon account\n"
-                    "3. Your email server settings are correct\n\n"
-                    "Use /help for more information."
+                    "3. Your email server settings are correct"
                 )
-
-            # Final status update
-            await status_message.edit_text(final_message)
 
             # Cleanup files
             try:
-                # Clean up merged file
                 if processed_path and os.path.exists(processed_path):
                     os.remove(processed_path)
-
-                # Clean up original chapter files
                 for file_path in self.pending_chapters[user_id]:
                     if os.path.exists(file_path):
                         os.remove(file_path)
-
                 self.pending_chapters[user_id] = []
-
             except Exception as e:
                 self.logger.error(f"Error during cleanup: {e}")
-                # Don't show cleanup errors to user unless it's critical
 
         except Exception as e:
-            error_message = str(e)
-            self.logger.error(f"Error processing volume: {error_message}")
-
-            # Provide user-friendly error message
-            await update_status(
-                f"❌ Error processing volume:\n\n"
-                f"{error_message}\n\n"
-                f"Please try again or contact support if the issue persists."
+            self.logger.error(f"Error processing volume: {e}")
+            await status_message.edit_text(
+                f"❌ Error processing volume: {str(e)}\n"
+                f"Please try again."
             )
 
         finally:
-            # Clear metadata regardless of success/failure
             if user_id in self.merge_metadata:
                 del self.merge_metadata[user_id]
 

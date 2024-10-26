@@ -14,6 +14,17 @@ __version__ = '1.0.0'
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# Disable noisy loggers
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('telegram.ext').setLevel(logging.WARNING)
+
+# Setup basic logging configuration
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
 # Import main classes
 from .manga_merger import MangaVolumeMerger
 from .manga_bot import MangaBot
@@ -25,12 +36,6 @@ def setup_environment() -> None:
     """Setup required directories and logging"""
     # Create required directories
     os.makedirs('downloads', exist_ok=True)
-
-    # Setup logging
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.INFO
-    )
 
 
 def create_bot(token: str, allowed_users: list) -> Optional[MangaBot]:

@@ -131,14 +131,55 @@ class MangaBot:
         )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle the /status command"""
+        """Handle the /status command with enhanced information"""
         user_id = update.message.from_user.id
         if user_id not in self.allowed_users:
             await update.message.reply_text("Sorry, you're not authorized to use this bot.")
             return
 
-        pending_count = len(self.pending_chapters.get(user_id, []))
-        await update.message.reply_text(f"You have {pending_count} pending chapters.")
+        if user_id not in self.pending_chapters or not self.pending_chapters[user_id]:
+            await update.message.reply_text("No pending chapters.")
+            return
+
+        try:
+            # Get chapter numbers for better information
+            chapter_info = []
+            for file_path in self.pending_chapters[user_id]:
+                try:
+                    chapter_num = self.merger.extract_chapter_number(file_path)
+                    chapter_info.append(chapter_num)
+                except ValueError:
+                    continue
+
+            chapter_info.sort()
+
+            if chapter_info:
+                if len(chapter_info) == 1:
+                    chapters_str = f"Chapter {chapter_info[0]}"
+                else:
+                    chapters_str = f"Chapters {chapter_info[0]}-{chapter_info[-1]}"
+            else:
+                chapters_str = "Unknown chapters"
+
+            total_size = sum(
+                os.path.getsize(f) for f in self.pending_chapters[user_id]
+                if os.path.exists(f)
+            )
+            size_mb = total_size / (1024 * 1024)
+
+            await update.message.reply_text(
+                f"📚 Pending: {len(self.pending_chapters[user_id])} files\n"
+                f"📑 {chapters_str}\n"
+                f"💾 Total size: {size_mb:.1f}MB\n\n"
+                f"Use /merge when ready to process or /clear to remove all."
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error in status: {e}")
+            await update.message.reply_text(
+                f"You have {len(self.pending_chapters[user_id])} pending chapters.\n"
+                "Use /merge when ready or /clear to remove all."
+            )
 
     async def clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle the /clear command"""
@@ -257,35 +298,6 @@ class MangaBot:
         )
         return self.CONFIRM
 
-    async def get_volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handle volume number input"""
-        user_id = update.message.from_user.id
-        try:
-            volume = int(update.message.text.strip())
-            if volume <= 0:
-                raise ValueError("Volume must be positive")
-        except ValueError:
-            await update.message.reply_text("Please enter a valid positive number.")
-            return self.VOLUME
-
-        self.merge_metadata[user_id]['volume'] = volume
-
-        keyboard = [[
-            InlineKeyboardButton("✅ Confirm", callback_data='confirm'),
-            InlineKeyboardButton("❌ Cancel", callback_data='cancel')
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text(
-            f"Please confirm the following:\n\n"
-            f"Manga: {self.merge_metadata[user_id]['title']}\n"
-            f"Volume: {volume}\n"
-            f"Chapters to merge: {len(self.pending_chapters[user_id])}\n\n"
-            f"Is this correct?",
-            reply_markup=reply_markup
-        )
-        return self.CONFIRM
-
     async def confirm_merge(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle merge confirmation and process the manga volume"""
         query = update.callback_query
@@ -296,65 +308,99 @@ class MangaBot:
             await query.edit_message_text("🚫 Merge cancelled.")
             return ConversationHandler.END
 
-        # Get metadata
         metadata = self.merge_metadata[user_id]
-        chapter_range = self.get_chapter_range(self.pending_chapters[user_id])
+        manga_title = metadata['title'].replace(' ', '_')
+        base_name = os.path.join("downloads", manga_title)
 
-        # Initialize status message
         status_message = await query.edit_message_text(
             "🔄 Processing chapters...\n"
             "Please wait, this may take a few minutes."
         )
 
         try:
-            # Create output filename
-            output_filename = f"{metadata['title']} {chapter_range}.pdf"
-            output_path = os.path.join("downloads", output_filename)
-
             # Merge chapters
-            processed_path = self.merger.merge_chapters_to_volume(
+            processed_volumes = self.merger.merge_chapters_to_volume(
                 self.pending_chapters[user_id],
-                output_path
+                base_name
             )
 
-            if not processed_path or not os.path.exists(processed_path):
+            if not processed_volumes:
                 await status_message.edit_text(
                     "❌ Failed to merge chapters.\n"
                     "Please check if all files are valid manga chapters."
                 )
                 return ConversationHandler.END
 
-            await status_message.edit_text(
-                "📤 Sending to Kindle...\n"
-                "Please wait..."
+            # Send each volume to Kindle and Telegram
+            total_volumes = len(processed_volumes)
+            successful_sends_kindle = []
+            failed_sends_kindle = []
+            successful_sends_telegram = []
+            failed_sends_telegram = []
+
+            for i, (pdf_path, chapter_range) in enumerate(processed_volumes, 1):
+                await status_message.edit_text(
+                    f"📤 Sending volume {chapter_range}...\n"
+                    f"({i}/{total_volumes})"
+                )
+
+                # Send to Kindle
+                kindle_success = self.kindle_sender.send_file(pdf_path)
+                if kindle_success:
+                    successful_sends_kindle.append(chapter_range)
+                else:
+                    failed_sends_kindle.append(chapter_range)
+
+                # Send to Telegram
+                try:
+                    with open(pdf_path, 'rb') as pdf_file:
+                        await context.bot.send_document(
+                            chat_id=user_id,
+                            document=pdf_file,
+                            filename=f"{manga_title}{chapter_range}.pdf",
+                            caption=f"📚 {metadata['title']} {chapter_range}"
+                        )
+                    successful_sends_telegram.append(chapter_range)
+                except Exception as e:
+                    self.logger.error(f"Failed to send PDF to Telegram: {e}")
+                    failed_sends_telegram.append(chapter_range)
+
+            # Prepare completion message
+            status_kindle = "✅" if successful_sends_kindle and not failed_sends_kindle else "⚠️" if successful_sends_kindle else "❌"
+            status_telegram = "✅" if successful_sends_telegram and not failed_sends_telegram else "⚠️" if successful_sends_telegram else "❌"
+
+            result_message = (
+                f"📱 Telegram Delivery: {status_telegram}\n"
+                f"📖 Kindle Delivery: {status_kindle}\n\n"
+                f"📚 {metadata['title']}\n"
             )
 
-            # Send to Kindle
-            success = self.kindle_sender.send_file(processed_path)
+            if successful_sends_kindle:
+                result_message += f"✅ Sent to Kindle: Chapters {', '.join(successful_sends_kindle)}\n"
+            if failed_sends_kindle:
+                result_message += f"❌ Failed (Kindle): Chapters {', '.join(failed_sends_kindle)}\n"
 
-            if success:
-                await status_message.edit_text(
-                    f"✅ Success! {metadata['title']} {chapter_range}"
-                    f" has been sent to your Kindle.\n\n"
-                    f"📚 Chapters merged: {len(self.pending_chapters[user_id])}\n"
-                    f"📧 Sent to: {self.kindle_sender.kindle_email}"
-                )
-            else:
-                await status_message.edit_text(
-                    "❌ Failed to send to Kindle.\n\n"
-                    "Please check:\n"
-                    "1. Your Kindle email address is correct\n"
-                    "2. The sender email is approved in your Amazon account\n"
-                    "3. Your email server settings are correct"
-                )
+            if successful_sends_telegram:
+                result_message += f"✅ Sent to Telegram: Chapters {', '.join(successful_sends_telegram)}\n"
+            if failed_sends_telegram:
+                result_message += f"❌ Failed (Telegram): Chapters {', '.join(failed_sends_telegram)}\n"
+
+            result_message += f"\n📧 Kindle: {self.kindle_sender.kindle_email}"
+
+            await status_message.edit_text(result_message)
 
             # Cleanup files
             try:
-                if processed_path and os.path.exists(processed_path):
-                    os.remove(processed_path)
+                # Clean up processed volumes
+                for pdf_path, _ in processed_volumes:
+                    if os.path.exists(pdf_path):
+                        os.remove(pdf_path)
+
+                # Clean up original files
                 for file_path in self.pending_chapters[user_id]:
                     if os.path.exists(file_path):
                         os.remove(file_path)
+
                 self.pending_chapters[user_id] = []
             except Exception as e:
                 self.logger.error(f"Error during cleanup: {e}")

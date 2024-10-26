@@ -26,8 +26,7 @@ class MangaBot:
 
     # Conversation states
     TITLE = 1
-    VOLUME = 2
-    CONFIRM = 3
+    CONFIRM = 2
 
     def __init__(
             self,
@@ -71,7 +70,6 @@ class MangaBot:
 
     def setup_handlers(self) -> None:
         """Setup all bot command and message handlers"""
-
         # Create conversation handler for merge command
         merge_conv_handler = ConversationHandler(
             entry_points=[CommandHandler('merge', self.merge_start)],
@@ -82,19 +80,12 @@ class MangaBot:
                         self.get_title
                     )
                 ],
-                self.VOLUME: [
-                    MessageHandler(
-                        filters.TEXT & ~filters.COMMAND,
-                        self.get_volume
-                    )
-                ],
                 self.CONFIRM: [
                     CallbackQueryHandler(self.confirm_merge, pattern='^(confirm|cancel)$')
                 ]
             },
             fallbacks=[CommandHandler('cancel', self.cancel_merge)],
-            name="merge_conversation",
-            persistent=False
+            name="merge_conversation"
         )
 
         # Define all handlers
@@ -217,6 +208,24 @@ class MangaBot:
         )
         return self.TITLE
 
+    def get_chapter_range(self, files: List[str]) -> str:
+        """Get the chapter range string from the files"""
+        try:
+            chapter_numbers = []
+            for file in files:
+                chapter_num = self.merger.extract_chapter_number(file)
+                chapter_numbers.append(chapter_num)
+
+            chapter_numbers.sort()
+
+            if len(chapter_numbers) == 1:
+                return f"[{chapter_numbers[0]}]"
+            else:
+                return f"[{chapter_numbers[0]}-{chapter_numbers[-1]}]"
+        except Exception as e:
+            self.logger.error(f"Error getting chapter range: {e}")
+            return "[unknown]"
+
     async def get_title(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle manga title input"""
         user_id = update.message.from_user.id
@@ -226,12 +235,27 @@ class MangaBot:
             await update.message.reply_text("Please enter a valid title.")
             return self.TITLE
 
-        self.merge_metadata[user_id]['title'] = title
+        self.merge_metadata[user_id] = {'title': title}
+
+        # Get chapter range
+        chapter_range = self.get_chapter_range(self.pending_chapters[user_id])
+
+        keyboard = [[
+            InlineKeyboardButton("✅ Confirm", callback_data='confirm'),
+            InlineKeyboardButton("❌ Cancel", callback_data='cancel')
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         await update.message.reply_text(
-            f"Title set to: {title}\n\n"
-            f"Please enter the volume number (e.g., '1'):"
+            f"Please confirm the following:\n\n"
+            f"Manga: {title}\n"
+            f"Chapters: {chapter_range}\n"
+            f"Files to merge: {len(self.pending_chapters[user_id])}\n\n"
+            f"Output will be: {title} {chapter_range}.pdf\n\n"
+            f"Is this correct?",
+            reply_markup=reply_markup
         )
-        return self.VOLUME
+        return self.CONFIRM
 
     async def get_volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle volume number input"""
@@ -274,6 +298,7 @@ class MangaBot:
 
         # Get metadata
         metadata = self.merge_metadata[user_id]
+        chapter_range = self.get_chapter_range(self.pending_chapters[user_id])
 
         # Initialize status message
         status_message = await query.edit_message_text(
@@ -283,10 +308,7 @@ class MangaBot:
 
         try:
             # Create output filename
-            output_filename = (
-                f"{metadata['title']}_Vol_{metadata['volume']}"
-                f"_{len(self.pending_chapters[user_id])}_chapters.pdf"
-            )
+            output_filename = f"{metadata['title']} {chapter_range}.pdf"
             output_path = os.path.join("downloads", output_filename)
 
             # Merge chapters
@@ -312,9 +334,9 @@ class MangaBot:
 
             if success:
                 await status_message.edit_text(
-                    f"✅ Success! Volume {metadata['volume']} of {metadata['title']}"
+                    f"✅ Success! {metadata['title']} {chapter_range}"
                     f" has been sent to your Kindle.\n\n"
-                    f"📚 Chapters: {len(self.pending_chapters[user_id])}\n"
+                    f"📚 Chapters merged: {len(self.pending_chapters[user_id])}\n"
                     f"📧 Sent to: {self.kindle_sender.kindle_email}"
                 )
             else:
@@ -338,9 +360,9 @@ class MangaBot:
                 self.logger.error(f"Error during cleanup: {e}")
 
         except Exception as e:
-            self.logger.error(f"Error processing volume: {e}")
+            self.logger.error(f"Error processing chapters: {e}")
             await status_message.edit_text(
-                f"❌ Error processing volume: {str(e)}\n"
+                f"❌ Error processing chapters: {str(e)}\n"
                 f"Please try again."
             )
 

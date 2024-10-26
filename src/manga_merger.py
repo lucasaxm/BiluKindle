@@ -8,7 +8,7 @@ class MangaVolumeMerger:
     """Handles the merging of manga chapters into volumes"""
 
     CHAPTER_PATTERNS = [
-        r'(?:chapter|cap(?:i|í)tulo|cap)[^\d]*(\d+)',  # chapter 1, capitulo 1, cap 1
+        r'(\d+)(?!.*\d)',  # last number is the chapter number
         r'[^\d]*(\d+)(?:\s*$|\s*v\d+)',  # 1, 001, etc.
         r'(?:^|\s)(\d+)(?:\s|$)',  # standalone numbers
     ]

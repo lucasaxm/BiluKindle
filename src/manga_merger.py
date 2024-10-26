@@ -24,7 +24,7 @@ class MangaVolumeMerger:
         r'(?:^|\s)(\d+)(?:\s|$)',  # standalone numbers
     ]
 
-    MAX_PDF_SIZE = 23 * 1024 * 1024  # 45MB to be safe (Kindle limit is 50MB)
+    MAX_PDF_SIZE = 23 * 1024 * 1024  # 23MB to be safe (Gmail limit is 25MB)
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)

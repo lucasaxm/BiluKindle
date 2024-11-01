@@ -127,6 +127,14 @@ class MangaVolumeMerger:
             # Unzip CBZ files
             temp_dirs = [self.unzip_cbz(file, base_name) for file in chapter_files]
 
+            # Manually create the "A" directory and copy "cover.jpg" into it
+            cover_photo_path = os.path.join("downloads", "cover.jpg")
+            if os.path.exists(cover_photo_path):
+                cover_dir = os.path.join(base_name, "A")
+                os.makedirs(cover_dir, exist_ok=True)
+                shutil.copy(cover_photo_path, os.path.join(cover_dir, "cover.jpg"))
+                temp_dirs.append(cover_dir)
+
             # Convert to EPUB
             epub_files = self.convert_to_epub(base_name, f"{base_name}.epub")
 

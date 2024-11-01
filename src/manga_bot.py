@@ -68,6 +68,7 @@ class MangaBot:
             CommandHandler("cancel", self.cancel_merge),
             MessageHandler(filters.Document.ALL & ~filters.COMMAND, self.handle_document),
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text),
+            MessageHandler(filters.PHOTO, self.handle_photo),
             CommandHandler("confirm", self.confirm_merge)  # Updated line
         ]
 
@@ -141,13 +142,28 @@ class MangaBot:
             # Format file list
             file_list = "\n".join(f"📁 {os.path.basename(file_path)}" for _, file_path in chapter_info)
 
-            await update.message.reply_text(
-                f"📚 Pending: {len(chapter_info)} files\n"
-                f"📑 {chapters_str}\n\n"
-                f"{file_list}\n\n"
-                f"💾 Total size: {size_mb:.1f}MB\n\n"
-                f"Use /merge when ready to process or /clear to remove all."
-            )
+            # Check if cover photo exists
+            cover_photo_path = os.path.join("downloads", "cover.jpg")
+            if os.path.exists(cover_photo_path):
+                with open(cover_photo_path, 'rb') as photo:
+                    await update.message.reply_photo(
+                        photo=photo,
+                        caption=(
+                            f"📚 Pending: {len(chapter_info)} files\n"
+                            f"📑 {chapters_str}\n\n"
+                            f"{file_list}\n\n"
+                            f"💾 Total size: {size_mb:.1f}MB\n\n"
+                            f"Use /merge when ready to process or /clear to remove all."
+                        )
+                    )
+            else:
+                await update.message.reply_text(
+                    f"📚 Pending: {len(chapter_info)} files\n"
+                    f"📑 {chapters_str}\n\n"
+                    f"{file_list}\n\n"
+                    f"💾 Total size: {size_mb:.1f}MB\n\n"
+                    f"Use /merge when ready to process or /clear to remove all."
+                )
 
         except Exception as e:
             self.logger.error(f"Error in status: {e}")
@@ -155,6 +171,21 @@ class MangaBot:
                 f"You have {len(self.pending_chapters[user_id])} pending chapters.\n"
                 "Use /merge when ready or /clear to remove all."
             )
+
+    async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle received photos"""
+        user_id = update.message.from_user.id
+        if user_id not in self.allowed_users:
+            await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+            return
+
+        photo = update.message.photo[-1]  # Get the highest resolution photo
+        file = await context.bot.get_file(photo.file_id)
+        download_path = os.path.join("downloads", "cover.jpg")
+        os.makedirs("downloads", exist_ok=True)
+        await file.download_to_drive(download_path)
+
+        await self.status(update, context)
 
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle received documents"""

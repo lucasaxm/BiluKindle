@@ -150,6 +150,9 @@ class MangaBot:
 
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle received documents"""
+        if update.message.chat_id == int(self.storage_chat_id):
+            return
+
         user_id = update.message.from_user.id
         if user_id not in self.allowed_users:
             await update.message.reply_text("Sorry, you're not authorized to use this bot.")
@@ -177,26 +180,24 @@ class MangaBot:
             f"Use /merge when you've sent all chapters."
         )
 
-    async def send_large_file(self, file_path: str, user_id: int, caption: str) -> bool:
+    async def send_large_file(self, file_path: str) -> str:
         """
         Send a large file using Telethon first to storage chat, then forward to user
 
         Args:
             file_path: Path to the file to send
-            user_id: Telegram user ID to send the file to
             caption: Caption for the file
 
         Returns:
-            bool: True if successful, False otherwise
+            str: file_id if successful, empty string otherwise
         """
-
         try:
             # First upload to storage chat using Telethon
             self.logger.info(f"Uploading file to storage chat: {file_path}")
+            file_handle = await self.telethon_client.upload_file(file=file_path, part_size_kb=512)
             message = await self.telethon_client.send_file(
                 int(self.storage_chat_id),
-                file_path,
-                caption=caption,
+                file_handle,
                 force_document=True
             )
 
@@ -207,31 +208,23 @@ class MangaBot:
                 # Use the official bot API to get the file ID
                 storage_chat_id = int(self.storage_chat_id)
                 bot_message = await self.application.bot.forward_message(
-                    chat_id=user_id,
+                    chat_id=storage_chat_id,
                     from_chat_id=storage_chat_id,
                     message_id=message_id
                 )
 
                 if bot_message and bot_message.document:
-                    file_id = bot_message.document.file_id
-
-                    # Now send to user using the bot API with the file_id
-                    await self.application.bot.send_document(
-                        chat_id=user_id,
-                        document=file_id,
-                        caption=caption
-                    )
-                    return True
+                    return bot_message.document.file_id
                 else:
                     self.logger.error("Failed to get file_id from forwarded message")
-                    return False
+                    return ""
             else:
                 self.logger.error("Failed to get message ID from uploaded message")
-                return False
+                return ""
 
         except Exception as e:
             self.logger.error(f"Error sending large file: {str(e)}")
-            return False
+            return ""
 
     async def merge_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.message.from_user.id
@@ -332,14 +325,32 @@ class MangaBot:
             for i, (file_path, chapter_range) in enumerate(processed_volumes, 1):
                 await status_message.edit_text(f"📤 Sending volume {chapter_range}...\n({i}/{total_volumes})")
                 caption = f"📚 {metadata['title']} {chapter_range}"
-                success = await self.send_large_file(file_path, user_id, caption)
+                file_id = await self.send_large_file(file_path)
 
-                if success:
+                if file_id:
+                    await self.application.bot.send_document(
+                        chat_id=user_id,
+                        document=file_id,
+                        caption=caption
+                    )
+                    # status_message = await self.application.bot.do_api_request(
+                    #     endpoint="editMessageMedia",
+                    #     api_kwargs={
+                    #         "chat_id": user_id,
+                    #         "message_id": status_message.id,
+                    #         "media": {
+                    #             "type": "document",
+                    #             "media": file_id,
+                    #             "caption": status_message.text
+                    #         }
+                    #     },
+                    #     return_type=Message
+                    # )
                     successful_sends.append(chapter_range)
                 else:
                     failed_sends.append(chapter_range)
 
-            status = "✅" if successful_sends and not failed_sends else "⚠️" if successful_sends else "❌"
+            status = "✅" if successful_sends and not failed_sends else "���️" if successful_sends else "❌"
             result_message = f"📱 File Delivery: {status}\n📚 {metadata['title']}\n"
 
             if successful_sends:

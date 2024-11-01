@@ -23,6 +23,7 @@ logger.setLevel(logging.INFO)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
 logging.getLogger('telegram.ext').setLevel(logging.WARNING)
+logging.getLogger('telethon.crypto.aes').setLevel(logging.INFO)
 
 # Setup basic logging configuration
 logging.basicConfig(

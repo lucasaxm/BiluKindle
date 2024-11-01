@@ -1,5 +1,6 @@
 import logging
 import os
+import typing
 from typing import List, Dict, Any
 
 from telegram import Update
@@ -216,13 +217,14 @@ class MangaBot:
 
         await self.status(update, context)
 
-    async def send_large_file(self, file_path: str) -> str:
+    async def send_large_file(self, file_path: str,
+                              progress_callback: typing.Optional[typing.Callable[[int, int], None]] = None) -> str:
         """
         Send a large file using Telethon first to storage chat, then forward to user
 
         Args:
             file_path: Path to the file to send
-            caption: Caption for the file
+            progress_callback: A callback function accepting two parameters: (sent bytes, total)
 
         Returns:
             str: file_id if successful, empty string otherwise
@@ -230,7 +232,11 @@ class MangaBot:
         try:
             # First upload to storage chat using Telethon
             self.logger.info(f"Uploading file to storage chat: {file_path}")
-            file_handle = await self.telethon_client.upload_file(file=file_path, part_size_kb=512)
+            file_handle = await self.telethon_client.upload_file(
+                file=file_path,
+                part_size_kb=512,
+                progress_callback=progress_callback
+            )
             message = await self.telethon_client.send_file(
                 int(self.storage_chat_id),
                 file_handle,
@@ -345,6 +351,11 @@ class MangaBot:
         status_message = await update.message.reply_text(
             "🔄 Processing chapters...\nPlease wait, this may take a few minutes.")
 
+        def progress_callback(sent_bytes, total_bytes):
+            progress = (sent_bytes / total_bytes) * 100
+            progress_text = f"📤 Uploading: {progress:.2f}%"
+            context.application.create_task(status_message.edit_text(progress_text))
+
         try:
             processed_volumes = self.merger.merge_chapters_to_volume(self.pending_chapters[user_id], manga_title)
 
@@ -360,7 +371,7 @@ class MangaBot:
             for i, (file_path, chapter_range) in enumerate(processed_volumes, 1):
                 await status_message.edit_text(f"📤 Sending volume {chapter_range}...\n({i}/{total_volumes})")
                 caption = f"📚 {metadata['title']} {chapter_range}"
-                file_id = await self.send_large_file(file_path)
+                file_id = await self.send_large_file(file_path, progress_callback=progress_callback)
 
                 if file_id:
                     await self.application.bot.send_document(
@@ -368,24 +379,11 @@ class MangaBot:
                         document=file_id,
                         caption=caption
                     )
-                    # status_message = await self.application.bot.do_api_request(
-                    #     endpoint="editMessageMedia",
-                    #     api_kwargs={
-                    #         "chat_id": user_id,
-                    #         "message_id": status_message.id,
-                    #         "media": {
-                    #             "type": "document",
-                    #             "media": file_id,
-                    #             "caption": status_message.text
-                    #         }
-                    #     },
-                    #     return_type=Message
-                    # )
                     successful_sends.append(chapter_range)
                 else:
                     failed_sends.append(chapter_range)
 
-            status = "✅" if successful_sends and not failed_sends else "���️" if successful_sends else "❌"
+            status = "✅" if successful_sends and not failed_sends else "⚠️" if successful_sends else "❌"
             result_message = f"📱 File Delivery: {status}\n📚 {metadata['title']}\n"
 
             if successful_sends:
@@ -402,6 +400,10 @@ class MangaBot:
             for file_path in self.pending_chapters[user_id]:
                 if os.path.exists(file_path):
                     os.remove(file_path)
+
+            cover_photo_path = os.path.join("downloads", "cover.jpg")
+            if os.path.exists(cover_photo_path):
+                os.remove(cover_photo_path)
 
             self.pending_chapters[user_id] = []
 

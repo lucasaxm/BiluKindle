@@ -1,5 +1,6 @@
 import os
 from typing import List, Dict
+
 from dotenv import load_dotenv
 
 # Load .env file
@@ -8,16 +9,11 @@ load_dotenv()
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 ALLOWED_USERS = [int(id) for id in os.getenv('ALLOWED_USERS', '').split(',') if id]
-
-# Kindle Configuration
-KINDLE_EMAIL = os.getenv('KINDLE_EMAIL', '')
-SENDER_EMAIL = os.getenv('SENDER_EMAIL', '')
-SENDER_PASSWORD = os.getenv('SENDER_PASSWORD', '')
-SMTP_SERVER = os.getenv('SMTP_SERVER', '')
-SMTP_PORT = int(os.getenv('SMTP_PORT', '465'))
-SMTP_USE_SSL = os.getenv('SMTP_USE_SSL', 'True').lower() == 'true'
-# Processing Configuration
-CHAPTERS_PER_VOLUME = 10
+TELEGRAM_API_ID = os.getenv('TELEGRAM_API_ID', '')
+TELEGRAM_API_HASH = os.getenv('TELEGRAM_API_HASH', '')
+TELEGRAM_FILE_STORAGE_CHAT_ID = os.getenv('TELEGRAM_FILE_STORAGE_CHAT_ID', '')
+TELEGRAM_PHONE = os.getenv('TELEGRAM_PHONE', '')  # Format: +1234567890
+TELETHON_SESSION_STRING = os.getenv('TELETHON_SESSION_STRING', '')  # Will be generated first time
 
 
 # Validation
@@ -30,24 +26,21 @@ def validate_config() -> Dict[str, List[str]]:
     # Check required fields
     required_fields = [
         ('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN),
-        ('ALLOWED_USERS', ALLOWED_USERS),
-        ('KINDLE_EMAIL', KINDLE_EMAIL),
-        ('SENDER_EMAIL', SENDER_EMAIL),
-        ('SENDER_PASSWORD', SENDER_PASSWORD)
+        ('TELEGRAM_API_ID', TELEGRAM_API_ID),
+        ('TELEGRAM_API_HASH', TELEGRAM_API_HASH),
+        ('TELEGRAM_PHONE', TELEGRAM_PHONE),  # New required field
+        ('ALLOWED_USERS', ALLOWED_USERS)
     ]
 
     for field_name, field_value in required_fields:
         if not field_value:
             errors['missing'].append(field_name)
 
-    # Validate email formats
+    # Validate phone format
     import re
-    email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-
-    if KINDLE_EMAIL and not email_pattern.match(KINDLE_EMAIL):
-        errors['invalid'].append('KINDLE_EMAIL')
-    if SENDER_EMAIL and not email_pattern.match(SENDER_EMAIL):
-        errors['invalid'].append('SENDER_EMAIL')
+    phone_pattern = re.compile(r'^\+[1-9]\d{1,14}$')
+    if TELEGRAM_PHONE and not phone_pattern.match(TELEGRAM_PHONE):
+        errors['invalid'].append('TELEGRAM_PHONE')
 
     return errors
 

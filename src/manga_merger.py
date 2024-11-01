@@ -1,11 +1,13 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
+import zipfile
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-from PyPDF2 import PdfMerger
+from lxml import etree
 
 
 @dataclass
@@ -24,7 +26,7 @@ class MangaVolumeMerger:
         r'(?:^|\s)(\d+)(?:\s|$)',  # standalone numbers
     ]
 
-    MAX_PDF_SIZE = 23 * 1024 * 1024  # 23MB to be safe (Gmail limit is 25MB)
+    MAX_FILE_SIZE = '100'  # 47MB to be safe (Bot limit is 50MB)
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -44,50 +46,68 @@ class MangaVolumeMerger:
 
         raise ValueError(f"Could not extract chapter number from {filename}")
 
-    def convert_cbz_to_pdf(self, cbz_path: str, output_path: str) -> Optional[str]:
-        """Convert a single CBZ file to PDF using calibre"""
+    def unzip_cbz(self, cbz_path: str, output_dir: str) -> str:
+        """Unzip a CBZ file into a directory"""
+        chapter_dir = os.path.join(output_dir, str(self.extract_chapter_number(cbz_path)))
+        os.makedirs(chapter_dir, exist_ok=True)
+        with zipfile.ZipFile(cbz_path, 'r') as zip_ref:
+            zip_ref.extractall(chapter_dir)
+        return chapter_dir
+
+    def convert_to_epub(self, input_dir: str, output_file: str) -> List[str]:
+        """Convert a directory of images to EPUB using KCC"""
         try:
             cmd = [
-                'ebook-convert',
-                cbz_path,
-                output_path,
-                '--right2left',
-                '--dont-grayscale',
-                '--disable-trim',
-                '--keep-aspect-ratio',
-                '--dont-sharpen',
-                '--dont-normalize'
+                'kcc-c2e',
+                '-p', 'KPW5',
+                '-m',
+                '-u',
+                '-g', '0.90',
+                '--forcecolor',
+                '-f', 'EPUB',
+                '-o', output_file,
+                '-b', '1',
+                '--ts', self.MAX_FILE_SIZE,
+                input_dir
             ]
-
+            self.logger.info(f"Running command: {' '.join(cmd)}")
             subprocess.run(cmd, check=True)
-            return output_path
+            base_name = os.path.splitext(output_file)[0]
+            return [f"{base_name}.epub"] + [f"{base_name}_kcc{i}.epub" for i in range(100) if
+                                            os.path.exists(f"{base_name}_kcc{i}.epub")]
         except Exception as e:
-            self.logger.error(f"Failed to convert CBZ to PDF: {str(e)}")
-            return None
+            self.logger.error(f"Failed to convert to EPUB: {str(e)}")
+            return []
 
-    def merge_pdfs(self, pdf_files: List[str], output_path: str) -> Optional[str]:
-        """Merge multiple PDF files into one"""
-        try:
-            merger = PdfMerger()
-            for pdf in pdf_files:
-                merger.append(pdf)
+    def parse_nav_file(self, epub_file: str) -> tuple[int, int]:
+        """Parse the nav.xhtml file in the EPUB to get the chapter order"""
+        with zipfile.ZipFile(epub_file, 'r') as zip_ref:
+            nav_path = next((f.filename for f in zip_ref.filelist if f.filename.endswith('nav.xhtml')), None)
 
-            merger.write(output_path)
-            merger.close()
-            return output_path
-        except Exception as e:
-            self.logger.error(f"Failed to merge PDFs: {str(e)}")
-            return None
+            if nav_path is None:
+                raise "nav.xhtml file not found in EPUB"
 
-    def get_file_size(self, file_path: str) -> int:
-        """Get file size in bytes"""
-        return os.path.getsize(file_path)
+            with zip_ref.open(nav_path) as nav_file:
+                try:
+                    content = nav_file.read()
+                    tree = etree.fromstring(content)
 
-    def create_range_string(self, start: int, end: int) -> str:
-        """Create a chapter range string"""
-        if start == end:
-            return f"[{start}]"
-        return f"[{start}-{end}]"
+                    # Define namespaces and use them in the XPath expression
+                    namespaces = {'xhtml': 'http://www.w3.org/1999/xhtml'}
+                    chapters = tree.xpath('/xhtml:html/xhtml:body/xhtml:nav[1]/xhtml:ol/xhtml:li/xhtml:a/text()',
+                                          namespaces=namespaces)
+
+                    return min([int(chapter) for chapter in chapters]), max([int(chapter) for chapter in chapters])
+                except etree.XMLSyntaxError as e:
+                    raise f"Failed to parse nav.xhtml: {e}"
+
+    def remove_directory_contents(self, directory: str):
+        """Remove all contents of a directory"""
+        for root, dirs, files in os.walk(directory, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
 
     def merge_chapters_to_volume(self, chapter_files: List[str], base_name: str) -> List[Tuple[str, str]]:
         """
@@ -95,102 +115,29 @@ class MangaVolumeMerger:
         Returns: List of tuples (file_path, chapter_range)
         """
         try:
-            # Convert chapters to ChapterInfo objects
-            chapters: List[ChapterInfo] = []
-            temp_files: List[str] = []
+            # Unzip CBZ files
+            temp_dirs = [self.unzip_cbz(file, base_name) for file in chapter_files]
 
-            # First convert all CBZ to PDF and gather chapter info
-            for file_path in chapter_files:
-                chapter_num = self.extract_chapter_number(file_path)
+            # Convert to EPUB
+            epub_files = self.convert_to_epub(base_name, f"{base_name}.epub")
 
-                if file_path.lower().endswith('.cbz'):
-                    temp_pdf = f"{os.path.splitext(file_path)[0]}_temp.pdf"
-                    if self.convert_cbz_to_pdf(file_path, temp_pdf):
-                        chapters.append(ChapterInfo(temp_pdf, chapter_num, is_temp=True))
-                        temp_files.append(temp_pdf)
-                else:
-                    chapters.append(ChapterInfo(file_path, chapter_num))
+            # Parse nav.xhtml to get chapter order
+            chapter_ranges = [self.parse_nav_file(epub) for epub in epub_files]
 
-            # Sort chapters by number
-            chapters.sort(key=lambda x: x.chapter_number)
-
-            final_volumes: List[Tuple[str, str]] = []
-            current_merge: List[ChapterInfo] = []
-            last_successful_merge: Optional[str] = None
-            last_successful_range: Optional[str] = None
-
-            for chapter in chapters:
-                if not current_merge:
-                    current_merge.append(chapter)
-                    continue
-
-                # Try to merge with existing
-                temp_output = f"{base_name}_temp_merge_{len(current_merge)}.pdf"  # Add counter to avoid conflicts
-                merge_files = [
-                    last_successful_merge if last_successful_merge
-                    else current_merge[0].file_path
-                ]
-                merge_files.append(chapter.file_path)
-
-                if self.merge_pdfs(merge_files, temp_output):
-                    merged_size = self.get_file_size(temp_output)
-
-                    if merged_size <= self.MAX_PDF_SIZE:
-                        # Merge successful and within size limits
-                        if last_successful_merge and os.path.exists(last_successful_merge):
-                            os.remove(last_successful_merge)
-                        last_successful_merge = temp_output
-                        current_merge.append(chapter)
-
-                        range_str = self.create_range_string(
-                            current_merge[0].chapter_number,
-                            current_merge[-1].chapter_number
-                        )
-                        last_successful_range = range_str
-                    else:
-                        # Over size limit, save previous merge and start new
-                        if last_successful_merge:
-                            final_name = f"{base_name}{last_successful_range}.pdf"
-                            os.rename(last_successful_merge, final_name)
-                            final_volumes.append((final_name, last_successful_range))
-
-                        # Start new merge with current chapter
-                        current_merge = [chapter]
-                        last_successful_merge = None
-                        last_successful_range = None
-                else:
-                    self.logger.error(f"Failed to merge chapter {chapter.chapter_number}")
-
-            # Handle remaining chapters
-            if current_merge:
-                if last_successful_merge:
-                    range_str = self.create_range_string(
-                        current_merge[0].chapter_number,
-                        current_merge[-1].chapter_number
-                    )
-                    final_name = f"{base_name}{range_str}.pdf"
-                    os.rename(last_successful_merge, final_name)
-                    final_volumes.append((final_name, range_str))
-                else:
-                    # Single chapter remaining
-                    range_str = self.create_range_string(
-                        current_merge[0].chapter_number,
-                        current_merge[0].chapter_number
-                    )
-                    final_name = f"{base_name}{range_str}.pdf"
-                    if current_merge[0].is_temp:
-                        os.rename(current_merge[0].file_path, final_name)
-                    else:
-                        self.merge_pdfs([current_merge[0].file_path], final_name)
+            # Rename EPUB files based on chapter ranges
+            final_volumes = []
+            for epub, chapters in zip(epub_files, chapter_ranges):
+                if chapters:
+                    range_str = f"[{chapters[0]}-{chapters[1]}]" if chapters[1] > chapters[0] else f"[{chapters[0]}]"
+                    final_name = f"{base_name} {range_str}.epub"
+                    os.rename(epub, final_name)
                     final_volumes.append((final_name, range_str))
 
-            # Cleanup temporary files
-            for temp_file in temp_files:
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except:
-                        pass
+            # Cleanup temporary directories
+            for temp_dir in temp_dirs:
+                if os.path.exists(temp_dir):
+                    self.remove_directory_contents(temp_dir)
+                    shutil.rmtree(temp_dir)
 
             return final_volumes
 

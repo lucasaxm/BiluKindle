@@ -13,6 +13,7 @@ from telegram.ext import (
 from telethon import TelegramClient
 
 import config
+from . import manga_merger
 from .manga_merger import MangaVolumeMerger
 
 
@@ -109,34 +110,41 @@ class MangaBot:
             return
 
         try:
-            # Get chapter numbers for better information
+            # Get chapter numbers and associate them with file paths
             chapter_info = []
             for file_path in self.pending_chapters[user_id]:
                 try:
                     chapter_num = self.merger.extract_chapter_number(file_path)
-                    chapter_info.append(chapter_num)
+                    chapter_info.append((chapter_num, file_path))
                 except ValueError:
                     continue
 
+            # Sort by chapter number
             chapter_info.sort()
 
+            # Format chapter range
             if chapter_info:
                 if len(chapter_info) == 1:
-                    chapters_str = f"Chapter {chapter_info[0]}"
+                    chapters_str = f"Chapter {manga_merger.chapter_number_to_str(chapter_info[0][0])}"
                 else:
-                    chapters_str = f"Chapters {chapter_info[0]}-{chapter_info[-1]}"
+                    chapters_str = f"Chapters {manga_merger.chapter_number_to_str(chapter_info[0][0])}-{manga_merger.chapter_number_to_str(chapter_info[-1][0])}"
             else:
                 chapters_str = "Unknown chapters"
 
+            # Calculate total size
             total_size = sum(
-                os.path.getsize(f) for f in self.pending_chapters[user_id]
+                os.path.getsize(f) for _, f in chapter_info
                 if os.path.exists(f)
             )
             size_mb = total_size / (1024 * 1024)
 
+            # Format file list
+            file_list = "\n".join(f"📁 {os.path.basename(file_path)}" for _, file_path in chapter_info)
+
             await update.message.reply_text(
-                f"📚 Pending: {len(self.pending_chapters[user_id])} files\n"
-                f"📑 {chapters_str}\n"
+                f"📚 Pending: {len(chapter_info)} files\n"
+                f"📑 {chapters_str}\n\n"
+                f"{file_list}\n\n"
                 f"💾 Total size: {size_mb:.1f}MB\n\n"
                 f"Use /merge when ready to process or /clear to remove all."
             )
@@ -175,10 +183,7 @@ class MangaBot:
             self.pending_chapters[user_id] = []
         self.pending_chapters[user_id].append(download_path)
 
-        await update.message.reply_text(
-            f"Chapter received! Total chapters: {len(self.pending_chapters[user_id])}\n"
-            f"Use /merge when you've sent all chapters."
-        )
+        await self.status(update, context)
 
     async def send_large_file(self, file_path: str) -> str:
         """
@@ -266,9 +271,9 @@ class MangaBot:
             chapter_numbers.sort()
 
             if len(chapter_numbers) == 1:
-                return f"[{chapter_numbers[0]}]"
+                return manga_merger.chapter_number_to_str(chapter_numbers[0])
             else:
-                return f"[{chapter_numbers[0]}-{chapter_numbers[-1]}]"
+                return f"[{manga_merger.chapter_number_to_str(chapter_numbers[0])}-{manga_merger.chapter_number_to_str(chapter_numbers[-1])}]"
         except Exception as e:
             self.logger.error(f"Error getting chapter range: {e}")
             return "[unknown]"
@@ -305,13 +310,12 @@ class MangaBot:
 
         metadata = self.merge_metadata[user_id]
         manga_title = metadata['title']
-        base_name = os.path.join("downloads", manga_title)
 
         status_message = await update.message.reply_text(
             "🔄 Processing chapters...\nPlease wait, this may take a few minutes.")
 
         try:
-            processed_volumes = self.merger.merge_chapters_to_volume(self.pending_chapters[user_id], base_name)
+            processed_volumes = self.merger.merge_chapters_to_volume(self.pending_chapters[user_id], manga_title)
 
             if not processed_volumes:
                 await status_message.edit_text(
@@ -370,9 +374,6 @@ class MangaBot:
 
             self.pending_chapters[user_id] = []
 
-            if os.path.exists(base_name):
-                os.rmdir(base_name)
-
         except Exception as e:
             self.logger.error(f"Error processing chapters: {e}")
             await status_message.edit_text(f"❌ Error processing chapters: {str(e)}\nPlease try again.")
@@ -400,9 +401,12 @@ class MangaBot:
 
         if user_id in self.pending_chapters:
             # Clean up files
-            for file_path in self.pending_chapters[user_id]:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+            for root, dirs, files in os.walk("downloads", topdown=False):
+                for file in files:
+                    if file != ".gitkeep":
+                        os.remove(os.path.join(root, file))
+                for dir in dirs:
+                    os.rmdir(os.path.join(root, dir))
             self.pending_chapters[user_id] = []
             await update.message.reply_text("Pending chapters cleared!")
         else:

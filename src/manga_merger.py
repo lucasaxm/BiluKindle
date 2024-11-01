@@ -13,17 +13,21 @@ from lxml import etree
 @dataclass
 class ChapterInfo:
     file_path: str
-    chapter_number: int
+    chapter_number: float
     is_temp: bool = False
+
+
+def chapter_number_to_str(ch_n: float) -> str:
+    return f"{int(ch_n)}" if ch_n.is_integer() else f"{ch_n}"
 
 
 class MangaVolumeMerger:
     """Handles the merging of manga chapters into volumes"""
 
     CHAPTER_PATTERNS = [
-        r'(\d+)(?!.*\d)',  # last number is the chapter number
-        r'[^\d]*(\d+)(?:\s*$|\s*v\d+)',  # 1, 001, etc.
-        r'(?:^|\s)(\d+)(?:\s|$)',  # standalone numbers
+        r'(\d+(\.\d+)?)(?!.*\d)',  # last number is the chapter number, including decimals
+        r'[^\d]*(\d+(\.\d+)?)(?:\s*$|\s*v\d+)',  # 1, 001, 1.5, etc.
+        r'(?:^|\s)(\d+(\.\d+)?)(?:\s|$)',  # standalone numbers, including decimals
     ]
 
     MAX_FILE_SIZE = '100'  # 47MB to be safe (Bot limit is 50MB)
@@ -31,24 +35,25 @@ class MangaVolumeMerger:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
 
-    def extract_chapter_number(self, filename: str) -> int:
+    def extract_chapter_number(self, filename: str) -> float:
         """Extract chapter number from filename"""
         filename_lower = filename.lower()
 
         for pattern in self.CHAPTER_PATTERNS:
             match = re.search(pattern, filename_lower)
             if match:
-                return int(match.group(1))
+                return float(match.group(1))
 
-        numbers = re.findall(r'\d+', filename_lower)
+        numbers = re.findall(r'\d+(\.\d+)?', filename_lower)
         if numbers:
-            return int(numbers[0])
+            return float(numbers[0])
 
         raise ValueError(f"Could not extract chapter number from {filename}")
 
     def unzip_cbz(self, cbz_path: str, output_dir: str) -> str:
         """Unzip a CBZ file into a directory"""
-        chapter_dir = os.path.join(output_dir, str(self.extract_chapter_number(cbz_path)))
+        chapter_str = chapter_number_to_str(self.extract_chapter_number(cbz_path))
+        chapter_dir = os.path.join(output_dir, f"Chapter {chapter_str}")
         os.makedirs(chapter_dir, exist_ok=True)
         with zipfile.ZipFile(cbz_path, 'r') as zip_ref:
             zip_ref.extractall(chapter_dir)
@@ -79,7 +84,7 @@ class MangaVolumeMerger:
             self.logger.error(f"Failed to convert to EPUB: {str(e)}")
             return []
 
-    def parse_nav_file(self, epub_file: str) -> tuple[int, int]:
+    def parse_nav_file(self, epub_file: str) -> tuple[float, float]:
         """Parse the nav.xhtml file in the EPUB to get the chapter order"""
         with zipfile.ZipFile(epub_file, 'r') as zip_ref:
             nav_path = next((f.filename for f in zip_ref.filelist if f.filename.endswith('nav.xhtml')), None)
@@ -96,8 +101,9 @@ class MangaVolumeMerger:
                     namespaces = {'xhtml': 'http://www.w3.org/1999/xhtml'}
                     chapters = tree.xpath('/xhtml:html/xhtml:body/xhtml:nav[1]/xhtml:ol/xhtml:li/xhtml:a/text()',
                                           namespaces=namespaces)
-
-                    return min([int(chapter) for chapter in chapters]), max([int(chapter) for chapter in chapters])
+                    chapters = [ch for ch in chapters if ch.strip().upper() != "A"]
+                    return min([self.extract_chapter_number(chapter) for chapter in chapters]), max(
+                        [self.extract_chapter_number(chapter) for chapter in chapters])
                 except etree.XMLSyntaxError as e:
                     raise f"Failed to parse nav.xhtml: {e}"
 
@@ -109,11 +115,14 @@ class MangaVolumeMerger:
             for name in dirs:
                 os.rmdir(os.path.join(root, name))
 
-    def merge_chapters_to_volume(self, chapter_files: List[str], base_name: str) -> List[Tuple[str, str]]:
+    def merge_chapters_to_volume(self, chapter_files: List[str], manga_title: str) -> List[Tuple[str, str]]:
         """
         Convert and merge chapters into volumes based on size and chapter numbers
         Returns: List of tuples (file_path, chapter_range)
         """
+        base_name = os.path.join("downloads", manga_title)
+        temp_dirs = []
+
         try:
             # Unzip CBZ files
             temp_dirs = [self.unzip_cbz(file, base_name) for file in chapter_files]
@@ -128,19 +137,37 @@ class MangaVolumeMerger:
             final_volumes = []
             for epub, chapters in zip(epub_files, chapter_ranges):
                 if chapters:
-                    range_str = f"[{chapters[0]}-{chapters[1]}]" if chapters[1] > chapters[0] else f"[{chapters[0]}]"
+                    if chapters[1] > chapters[0]:
+                        range_str = f"[{chapter_number_to_str(chapters[0])}-{chapter_number_to_str(chapters[1])}]"
+                    else:
+                        range_str = f"[{chapter_number_to_str(chapters[0])}]"
                     final_name = f"{base_name} {range_str}.epub"
                     os.rename(epub, final_name)
                     final_volumes.append((final_name, range_str))
-
-            # Cleanup temporary directories
-            for temp_dir in temp_dirs:
-                if os.path.exists(temp_dir):
-                    self.remove_directory_contents(temp_dir)
-                    shutil.rmtree(temp_dir)
 
             return final_volumes
 
         except Exception as e:
             self.logger.error(f"Failed to merge chapters: {str(e)}")
             return []
+
+        finally:
+            # Cleanup temporary directories
+            for temp_dir in temp_dirs:
+                if os.path.exists(temp_dir):
+                    self.remove_directory_contents(temp_dir)
+                    shutil.rmtree(temp_dir)
+
+            # Cleanup base directory
+            if os.path.exists(base_name):
+                self.remove_directory_contents(base_name)
+                shutil.rmtree(base_name)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    merger = MangaVolumeMerger()
+    filename = "Anima Regia_Vol. 4, Ch. 23_ Extra.cbz"
+    chapter_number = merger.extract_chapter_number(filename)
+    chapter_str = f"{int(chapter_number)}" if chapter_number.is_integer() else f"{chapter_number}"
+    print(f"Extracted chapter number: {chapter_str}")

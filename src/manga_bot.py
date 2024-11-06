@@ -3,7 +3,7 @@ import os
 import typing
 from typing import List, Dict, Any
 
-from telegram import Update
+from telegram import Update, InputMediaPhoto, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     ContextTypes,
@@ -26,7 +26,9 @@ class MangaBot:
 
     # Conversation states
     TITLE = 1
-    CONFIRM = 2
+    COVER = 2
+    CONFIRM = 3
+    REMOVE_PAGES = 5
 
     def __init__(
             self,
@@ -102,7 +104,6 @@ class MangaBot:
         )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle the /status command with enhanced information"""
         user_id = update.message.from_user.id
         if user_id not in self.allowed_users:
             await update.message.reply_text("Sorry, you're not authorized to use this bot.")
@@ -113,7 +114,6 @@ class MangaBot:
             return
 
         try:
-            # Delete the previous status message if it exists
             if user_id in self.last_status_message_id:
                 try:
                     await context.bot.delete_message(chat_id=update.message.chat_id,
@@ -121,7 +121,6 @@ class MangaBot:
                 except Exception as e:
                     self.logger.error(f"Error deleting previous status message: {e}")
 
-            # Get chapter numbers and associate them with file paths
             chapter_info = []
             for file_path in self.pending_chapters[user_id]:
                 try:
@@ -130,10 +129,8 @@ class MangaBot:
                 except ValueError:
                     continue
 
-            # Sort by chapter number
             chapter_info.sort()
 
-            # Format chapter range
             if chapter_info:
                 if len(chapter_info) == 1:
                     chapters_str = f"Chapter {manga_merger.chapter_number_to_str(chapter_info[0][0])}"
@@ -142,21 +139,18 @@ class MangaBot:
             else:
                 chapters_str = "Unknown chapters"
 
-            # Calculate total size
-            total_size = sum(
-                os.path.getsize(f) for _, f in chapter_info
-                if os.path.exists(f)
-            )
+            total_size = sum(os.path.getsize(f) for _, f in chapter_info if os.path.exists(f))
             size_mb = total_size / (1024 * 1024)
 
-            # Format file list
             file_list = "\n".join(f"📁 {os.path.basename(file_path)}" for _, file_path in chapter_info)
 
-            # Check if cover photo exists
             cover_photo_path = os.path.join("downloads", "cover.jpg")
             if os.path.exists(cover_photo_path):
                 with open(cover_photo_path, 'rb') as photo:
                     title = self.merge_metadata.get(user_id, {}).get('title', 'No title set')
+                    pages_to_remove = self.merge_metadata.get(user_id, {}).get('pages_to_remove', [])
+                    pages_to_remove_str = ', '.join(
+                        os.path.basename(page) for page in pages_to_remove) if pages_to_remove else 'None'
                     message = await update.message.reply_photo(
                         photo=photo,
                         caption=(
@@ -164,22 +158,28 @@ class MangaBot:
                             f"📑 {chapters_str}\n\n"
                             f"{file_list}\n\n"
                             f"💾 Total size: {size_mb:.1f}MB\n"
-                            f"📖 Title: {title}\n\n"
+                            f"📖 Title: {title}\n"
+                            f"🗑️ Pages to remove: {pages_to_remove_str}\n\n"
                             f"Use /{'confirm to proceed or /cancel to abort' if self.user_states.get(user_id) == self.CONFIRM else 'merge when ready to process or /clear to remove all.'}"
-                        )
+                        ),
+                        reply_markup=ReplyKeyboardRemove()
                     )
             else:
                 title = self.merge_metadata.get(user_id, {}).get('title', 'No title set')
+                pages_to_remove = self.merge_metadata.get(user_id, {}).get('pages_to_remove', [])
+                pages_to_remove_str = ', '.join(
+                    os.path.basename(page) for page in pages_to_remove) if pages_to_remove else 'None'
                 message = await update.message.reply_text(
                     f"📚 Pending: {len(chapter_info)} files\n"
                     f"📑 {chapters_str}\n\n"
                     f"{file_list}\n\n"
                     f"💾 Total size: {size_mb:.1f}MB\n"
-                    f"📖 Title: {title}\n\n"
-                    f"Use /{'confirm to proceed or /cancel to abort' if self.user_states.get(user_id) == self.CONFIRM else 'merge when ready to process or /clear to remove all.'}"
+                    f"📖 Title: {title}\n"
+                    f"🗑️ Pages to remove: {pages_to_remove_str}\n\n"
+                    f"Use /{'confirm to proceed or /cancel to abort' if self.user_states.get(user_id) == self.CONFIRM else 'merge when ready to process or /clear to remove all.'}",
+                    reply_markup=ReplyKeyboardRemove()
                 )
 
-            # Store the message ID of the new status message
             self.last_status_message_id[user_id] = message.message_id
 
         except Exception as e:
@@ -188,6 +188,54 @@ class MangaBot:
                 f"You have {len(self.pending_chapters[user_id])} pending chapters.\n"
                 "Use /merge when ready or /clear to remove all."
             )
+
+    async def ask_remove_pages(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.message.from_user.id
+        first_chapter = self.pending_chapters[user_id][0]
+        images = self.merger.extract_first_images(first_chapter, 5)
+
+        image_names = [os.path.basename(image) for image in images]
+
+        self.merge_metadata[user_id]['removable_pages'] = image_names
+        self.merge_metadata[user_id]['pages_to_remove'] = []
+
+        keyboard = [[name] for name in image_names] + [["Next"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+        await update.message.reply_text(
+            "Which pages would you like to delete?",
+            reply_markup=reply_markup
+        )
+
+        self.user_states[user_id] = self.REMOVE_PAGES
+
+    async def handle_remove_pages(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.message.from_user.id
+        response = update.message.text.strip()
+
+        if response.lower() == 'next':
+            self.user_states[user_id] = self.CONFIRM
+            await self.status(update, context)
+            return
+
+        removable_pages = self.merge_metadata[user_id]['removable_pages']
+        pages_to_remove = self.merge_metadata[user_id]['pages_to_remove']
+
+        if response not in removable_pages:
+            await update.message.reply_text(
+                "Invalid selection. Please choose a valid page number or 'Next' to proceed.")
+            return
+
+        pages_to_remove.append(response)
+
+        # Update the list of removable pages
+        updated_image_names = "\n".join(
+            [f"🗑️ {image}" if image in pages_to_remove else os.path.basename(image) for image in
+             removable_pages]
+        )
+        await update.message.reply_text(
+            f"Which pages would you like to delete?\n{updated_image_names}\n\nReply with the file name or 'Next' to proceed."
+        )
 
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle received photos"""
@@ -312,6 +360,10 @@ class MangaBot:
 
         if state == self.TITLE:
             await self.get_title(update, context)
+        elif state == self.COVER:
+            await self.handle_cover_selection(update, context)
+        elif state == self.REMOVE_PAGES:
+            await self.handle_remove_pages(update, context)
 
     def get_chapter_range(self, files: List[str]) -> str:
         """Get the chapter range string from the files"""
@@ -340,9 +392,54 @@ class MangaBot:
             return
 
         self.merge_metadata[user_id]['title'] = title
-        self.user_states[user_id] = self.CONFIRM
 
-        await self.status(update, context)
+        # Check if cover is set
+        cover_photo_path = os.path.join("downloads", "cover.jpg")
+        if not os.path.exists(cover_photo_path):
+            self.user_states[user_id] = self.COVER
+            await self.send_cover_options(update, context)
+        else:
+            await self.ask_remove_pages(update, context)
+
+    async def send_cover_options(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.message.from_user.id
+        first_chapter = self.pending_chapters[user_id][0]
+        images = self.merger.extract_first_images(first_chapter, 5)
+
+        media_group = [InputMediaPhoto(open(image, 'rb')) for image in images]
+        await context.bot.send_media_group(chat_id=user_id, media=media_group)
+
+        image_names = [os.path.basename(image) for image in images]
+        keyboard = [[name] for name in image_names]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+
+        await update.message.reply_text(
+            "Which page should be the cover?",
+            reply_markup=reply_markup
+        )
+
+    async def handle_cover_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.message.from_user.id
+        selected_image = update.message.text.strip()
+
+        first_chapter = self.pending_chapters[user_id][0]
+        images = self.merger.extract_first_images(first_chapter, 5)
+        image_names = [os.path.basename(image) for image in images]
+
+        if selected_image not in image_names:
+            await update.message.reply_text("Invalid selection. Please choose a valid page number.")
+            return
+
+        selected_image_path = images[image_names.index(selected_image)]
+        cover_photo_path = os.path.join("downloads", "cover.jpg")
+        os.rename(selected_image_path, cover_photo_path)
+
+        # Clean up extracted images
+        for image in images:
+            if os.path.exists(image):
+                os.remove(image)
+
+        await self.ask_remove_pages(update, context)
 
     async def confirm_merge(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.message.from_user.id
@@ -353,9 +450,11 @@ class MangaBot:
 
         metadata = self.merge_metadata[user_id]
         manga_title = metadata['title']
+        pages_to_remove = metadata.get('pages_to_remove', [])
 
         status_message = await update.message.reply_text(
-            "🔄 Processing chapters...\nPlease wait, this may take a few minutes.")
+            "🔄 Processing chapters...\nPlease wait, this may take a few minutes."
+        )
 
         def progress_callback(sent_bytes, total_bytes):
             progress = (sent_bytes / total_bytes) * 100
@@ -363,11 +462,14 @@ class MangaBot:
             context.application.create_task(status_message.edit_text(progress_text))
 
         try:
-            processed_volumes = self.merger.merge_chapters_to_volume(self.pending_chapters[user_id], manga_title)
+            processed_volumes = self.merger.merge_chapters_to_volume(
+                self.pending_chapters[user_id], manga_title, pages_to_remove=pages_to_remove
+            )
 
             if not processed_volumes:
                 await status_message.edit_text(
-                    "❌ Failed to merge chapters.\nPlease check if all files are valid manga chapters.")
+                    "❌ Failed to merge chapters.\nPlease check if all files are valid manga chapters."
+                )
                 return
 
             total_volumes = len(processed_volumes)

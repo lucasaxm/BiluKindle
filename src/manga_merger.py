@@ -115,17 +115,28 @@ class MangaVolumeMerger:
             for name in dirs:
                 os.rmdir(os.path.join(root, name))
 
-    def merge_chapters_to_volume(self, chapter_files: List[str], manga_title: str) -> List[Tuple[str, str]]:
+    def merge_chapters_to_volume(self, chapter_files: List[str], manga_title: str, pages_to_remove: List[str] = None) -> \
+    List[Tuple[str, str]]:
         """
         Convert and merge chapters into volumes based on size and chapter numbers
         Returns: List of tuples (file_path, chapter_range)
         """
         base_name = os.path.join("downloads", manga_title)
+        if pages_to_remove is None:
+            pages_to_remove = []
+
         temp_dirs = []
 
         try:
             # Unzip CBZ files
             temp_dirs = [self.unzip_cbz(file, base_name) for file in chapter_files]
+
+            # Remove specified pages
+            for temp_dir in temp_dirs[:1]:
+                for page in pages_to_remove:
+                    page_path = os.path.join(temp_dir, page)
+                    if os.path.exists(page_path):
+                        os.remove(page_path)
 
             # Manually create the "A" directory and copy "cover.jpg" into it
             cover_photo_path = os.path.join("downloads", "cover.jpg")
@@ -170,6 +181,30 @@ class MangaVolumeMerger:
             if os.path.exists(base_name):
                 self.remove_directory_contents(base_name)
                 shutil.rmtree(base_name)
+
+    def extract_first_images(self, chapter_path: str, num_images: int) -> List[str]:
+        """
+        Extract the first `num_images` images from the given chapter.
+
+        Args:
+            chapter_path: Path to the chapter file (CBZ).
+            num_images: Number of images to extract.
+
+        Returns:
+            List of file paths to the extracted images.
+        """
+        extracted_images = []
+
+        with zipfile.ZipFile(chapter_path, 'r') as zip_ref:
+            image_files = [f for f in zip_ref.namelist() if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+            image_files.sort()  # Ensure the images are in order
+            for image_file in image_files[:num_images]:
+                extracted_path = os.path.join("downloads", os.path.basename(image_file))
+                with open(extracted_path, 'wb') as image_out:
+                    image_out.write(zip_ref.read(image_file))
+                extracted_images.append(extracted_path)
+
+        return extracted_images
 
 
 if __name__ == "__main__":

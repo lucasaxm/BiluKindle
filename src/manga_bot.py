@@ -52,6 +52,7 @@ class MangaBot:
         self.pending_chapters: Dict[int, List[str]] = {}
         self.merge_metadata: Dict[int, Dict[str, Any]] = {}
         self.user_states: Dict[int, int] = {}
+        self.last_status_message_id: Dict[int, int] = {}  # Add this line
 
         # Setup logging
         self.logger = logging.getLogger(__name__)
@@ -112,6 +113,14 @@ class MangaBot:
             return
 
         try:
+            # Delete the previous status message if it exists
+            if user_id in self.last_status_message_id:
+                try:
+                    await context.bot.delete_message(chat_id=update.message.chat_id,
+                                                     message_id=self.last_status_message_id[user_id])
+                except Exception as e:
+                    self.logger.error(f"Error deleting previous status message: {e}")
+
             # Get chapter numbers and associate them with file paths
             chapter_info = []
             for file_path in self.pending_chapters[user_id]:
@@ -147,24 +156,31 @@ class MangaBot:
             cover_photo_path = os.path.join("downloads", "cover.jpg")
             if os.path.exists(cover_photo_path):
                 with open(cover_photo_path, 'rb') as photo:
-                    await update.message.reply_photo(
+                    title = self.merge_metadata.get(user_id, {}).get('title', 'No title set')
+                    message = await update.message.reply_photo(
                         photo=photo,
                         caption=(
                             f"📚 Pending: {len(chapter_info)} files\n"
                             f"📑 {chapters_str}\n\n"
                             f"{file_list}\n\n"
-                            f"💾 Total size: {size_mb:.1f}MB\n\n"
-                            f"Use /merge when ready to process or /clear to remove all."
+                            f"💾 Total size: {size_mb:.1f}MB\n"
+                            f"📖 Title: {title}\n\n"
+                            f"Use /{'confirm to proceed or /cancel to abort' if self.user_states.get(user_id) == self.CONFIRM else 'merge when ready to process or /clear to remove all.'}"
                         )
                     )
             else:
-                await update.message.reply_text(
+                title = self.merge_metadata.get(user_id, {}).get('title', 'No title set')
+                message = await update.message.reply_text(
                     f"📚 Pending: {len(chapter_info)} files\n"
                     f"📑 {chapters_str}\n\n"
                     f"{file_list}\n\n"
-                    f"💾 Total size: {size_mb:.1f}MB\n\n"
-                    f"Use /merge when ready to process or /clear to remove all."
+                    f"💾 Total size: {size_mb:.1f}MB\n"
+                    f"📖 Title: {title}\n\n"
+                    f"Use /{'confirm to proceed or /cancel to abort' if self.user_states.get(user_id) == self.CONFIRM else 'merge when ready to process or /clear to remove all.'}"
                 )
+
+            # Store the message ID of the new status message
+            self.last_status_message_id[user_id] = message.message_id
 
         except Exception as e:
             self.logger.error(f"Error in status: {e}")
@@ -326,17 +342,7 @@ class MangaBot:
         self.merge_metadata[user_id]['title'] = title
         self.user_states[user_id] = self.CONFIRM
 
-        chapter_range = self.get_chapter_range(self.pending_chapters[user_id])
-
-        await update.message.reply_text(
-            f"Please confirm the following:\n\n"
-            f"Manga: {title}\n"
-            f"Chapters: {chapter_range}\n"
-            f"Files to merge: {len(self.pending_chapters[user_id])}\n\n"
-            f"Output will be: {title} {chapter_range}.epub\n\n"
-            f"Is this correct?"
-            f"Use /confirm to proceed or /cancel to abort."
-        )
+        await self.status(update, context)
 
     async def confirm_merge(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.message.from_user.id
@@ -415,6 +421,8 @@ class MangaBot:
             del self.user_states[user_id]
             if user_id in self.merge_metadata:
                 del self.merge_metadata[user_id]
+            if user_id in self.last_status_message_id:
+                del self.last_status_message_id[user_id]
 
     async def cancel_merge(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.message.from_user.id
@@ -422,6 +430,8 @@ class MangaBot:
             del self.merge_metadata[user_id]
         if user_id in self.user_states:
             del self.user_states[user_id]
+        if user_id in self.last_status_message_id:
+            del self.last_status_message_id[user_id]
 
         await update.message.reply_text("Merge cancelled.\nIf you want to start from scratch send /clear")
 

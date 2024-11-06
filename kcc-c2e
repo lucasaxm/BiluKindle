@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# Run the kcc-c2e.py script with the provided arguments
+python /kcc/kcc-c2e.py "$@"

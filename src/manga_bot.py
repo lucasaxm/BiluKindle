@@ -54,7 +54,7 @@ class MangaBot:
         self.pending_chapters: Dict[int, List[str]] = {}
         self.merge_metadata: Dict[int, Dict[str, Any]] = {}
         self.user_states: Dict[int, int] = {}
-        self.last_status_message_id: Dict[int, int] = {}  # Add this line
+        self.last_status_message_id: Dict[int, int] = {}
 
         # Setup logging
         self.logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class MangaBot:
             MessageHandler(filters.Document.ALL & ~filters.COMMAND, self.handle_document),
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text),
             MessageHandler(filters.PHOTO, self.handle_photo),
-            CommandHandler("confirm", self.confirm_merge)  # Updated line
+            CommandHandler("confirm", self.confirm_merge)
         ]
 
         for handler in handlers:
@@ -269,16 +269,64 @@ class MangaBot:
             return
 
         # Download file
-        file = await context.bot.get_file(document.file_id)
         download_path = f"downloads/{document.file_name}"
         os.makedirs("downloads", exist_ok=True)
-        await file.download_to_drive(download_path)
+
+        status_message = await update.message.reply_text(f"🔄 Downloading {document.file_name}...\n0%.")
+
+        def progress_callback(current, total):
+            progress = (current / total) * 100
+            progress_rounded = int(progress // 5) * 5  # Round down to the nearest multiple of 5%
+
+            if not hasattr(progress_callback, 'last_progress'):
+                progress_callback.last_progress = 0
+
+            if progress_rounded > progress_callback.last_progress:
+                progress_text = f"🔄 Downloading {document.file_name}...\n{progress_rounded}%."
+                context.application.create_task(status_message.edit_text(progress_text))
+                progress_callback.last_progress = progress_rounded
+
+        try:
+            # Try downloading using python-telegram-bot
+            file = await context.bot.get_file(document.file_id)
+            await file.download_to_drive(download_path)
+        except Exception as e:
+            if 'File is too big' in str(e):
+                # Forward the document to the storage chat
+                forwarded_message = await update.message.forward(chat_id=int(self.storage_chat_id))
+
+                # Use Telethon to download the file from the storage chat
+                message_id = forwarded_message.message_id
+                storage_chat_id = int(self.storage_chat_id)
+
+                def telethon_progress_callback(downloaded, total_bytes):
+                    progress = (downloaded / total_bytes) * 100
+                    progress_rounded = int(progress // 5) * 5
+
+                    if not hasattr(telethon_progress_callback, 'last_progress'):
+                        telethon_progress_callback.last_progress = 0
+
+                    if progress_rounded > telethon_progress_callback.last_progress:
+                        progress_text = f"🔄 Downloading {document.file_name}...\n{progress_rounded}%."
+                        context.application.create_task(status_message.edit_text(progress_text))
+                        telethon_progress_callback.last_progress = progress_rounded
+
+                message = await self.telethon_client.get_messages(storage_chat_id, ids=message_id)
+                await self.telethon_client.download_media(
+                    message=message,
+                    file=download_path,
+                    progress_callback=telethon_progress_callback
+                )
+            else:
+                await status_message.edit_text(f"❌ Error downloading file: {str(e)}")
+                return
 
         # Store chapter
         if user_id not in self.pending_chapters:
             self.pending_chapters[user_id] = []
         self.pending_chapters[user_id].append(download_path)
 
+        await status_message.delete()
         await self.status(update, context)
 
     async def send_large_file(self, file_path: str,
@@ -458,8 +506,21 @@ class MangaBot:
 
         def progress_callback(sent_bytes, total_bytes):
             progress = (sent_bytes / total_bytes) * 100
-            progress_text = f"📤 Uploading: {progress:.2f}%"
-            context.application.create_task(status_message.edit_text(progress_text))
+            progress_rounded = int(progress // 5) * 5  # Round down to the nearest multiple of 5%
+
+            # Initialize last_progress attribute if it doesn't exist
+            if not hasattr(progress_callback, 'last_progress'):
+                progress_callback.last_progress = 0  # Initialize last_progress
+
+            # Only update if progress has increased by at least 5%
+            if progress_rounded > progress_callback.last_progress:
+                progress_text = f"📤 Uploading: {progress_rounded:.2f}%"
+
+                # Edit the message
+                context.application.create_task(status_message.edit_text(progress_text))
+
+                # Update last_progress
+                progress_callback.last_progress = progress_rounded
 
         try:
             processed_volumes = self.merger.merge_chapters_to_volume(

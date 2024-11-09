@@ -30,7 +30,7 @@ class MangaVolumeMerger:
         r'(?:^|\s)(\d+(\.\d+)?)(?:\s|$)',  # standalone numbers, including decimals
     ]
 
-    MAX_FILE_SIZE = '100'  # 47MB to be safe (Bot limit is 50MB)
+    MAX_FILE_SIZE = '195'  # 47MB to be safe (Bot limit is 50MB)
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ class MangaVolumeMerger:
                 os.rmdir(os.path.join(root, name))
 
     def merge_chapters_to_volume(self, chapter_files: List[str], manga_title: str, pages_to_remove: List[str] = None) -> \
-    List[Tuple[str, str]]:
+            List[Tuple[str, str]]:
         """
         Convert and merge chapters into volumes based on size and chapter numbers
         Returns: List of tuples (file_path, chapter_range)
